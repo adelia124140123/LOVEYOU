@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Love Heart</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #060208; overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// ====== KONFIGURASI (sama seperti di love.py) ======
+const SC = 21, OY = 20, DURATION = 10, TICK = 16, ANIM = 42, LIFT = 34, GAP = 7;
+const SIZES = [9, 10, 11, 12];
+const FONT = "Arial", BG = "#060208";
+const PT = 4 / 3; // konversi point (tkinter) -> pixel (browser)
+
+const PHRASES = [
+  "I love you Dewangga", "Seni seviyorum Dewangga", "Te amo Dewangga", "Je t'aime Dewangga",
+  "Ich liebe dich Dewangga", "Ti amo Dewangga", "Eu te amo Dewangga", "Я тебя люблю Dewangga",
+  "사랑해 데왕가", "愛してる デワンガ", "我爱你 德旺加", "मैं तुमसे प्यार करता हूँ देवांग्गा",
+  "Σ' αγαπώ Ντεβάνγκα", "Ik hou van jou Dewangga", "Jag älskar dig Dewangga", "Kocham cię Dewangga",
+  "ฉันรักเธอ เดวังกา", "Anh yêu em Dewangga", "Aku cinta kamu Dewangga", "Я тебе кохаю Девангга",
+];
+
+// ====== CANVAS ======
+const cv = document.getElementById("c");
+const ctx = cv.getContext("2d");
+const buf = document.createElement("canvas"); // layer untuk teks yang sudah selesai
+const bctx = buf.getContext("2d");
+let W, H, dpr, k;
+
+// ====== RANDOM DENGAN SEED (pengganti random.Random(11)) ======
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rand = mulberry32(11);
+const uniform = (a, b) => a + (b - a) * rand();
+const choice = (arr) => arr[Math.floor(rand() * arr.length)];
+function shuffle(a) {
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+}
+
+// ====== UTILITAS WARNA ======
+const hx = (c) => "#" + c.map((v) => Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, "0")).join("");
+const mix = (a, b, t) => a.map((p, i) => p + (b[i] - p) * t);
+const dim = (c, t) => c.map((v) => v * t);
+const clamp = (v) => Math.max(0, Math.min(1, v));
+const BGC = [1, 3, 5].map((i) => parseInt(BG.slice(i, i + 2), 16) / 255);
+const FLASH = [1.0, 0.78, 0.78];
+
+// ====== BENTUK HATI ======
+function heart(a) {
+  const x = 16 * Math.sin(a) ** 3;
+  const y = 13 * Math.cos(a) - 5 * Math.cos(2 * a) - 2 * Math.cos(3 * a) - Math.cos(4 * a);
+  return [x * SC, y * SC + OY];
+}
+const POLY = Array.from({ length: 720 }, (_, i) => heart((2 * Math.PI * i) / 720));
+const EDGES = POLY.map((p, i) => [p, POLY[(i + 1) % POLY.length]]);
+const YMAX = Math.max(...POLY.map((p) => p[1]));
+const YMIN = Math.min(...POLY.map((p) => p[1]));
+const CY = (YMAX + YMIN) / 2;
+
+// Cari rentang x (kiri-kanan) di dalam hati pada ketinggian y
+function spans(y) {
+  const xs = [];
+  for (const [[x1, y1], [x2, y2]] of EDGES) {
+    if ((y1 <= y && y < y2) || (y2 <= y && y < y1)) {
+      xs.push(x1 + ((y - y1) * (x2 - x1)) / (y2 - y1));
+    }
+  }
+  xs.sort((a, b) => a - b);
+  const out = [];
+  for (let i = 0; i + 1 < xs.length; i += 2) out.push([xs[i], xs[i + 1]]);
+  return out;
+}
+function intersect(A, B) {
+  const out = [];
+  for (const a of A) for (const b of B) {
+    const lo = Math.max(a[0], b[0]), hi = Math.min(a[1], b[1]);
+    if (hi - lo > 14) out.push([lo, hi]);
+  }
+  return out;
+}
+
+// ====== UKUR LEBAR TEKS ======
+const wCache = {};
+function measure(text, size) {
+  const key = size + "|" + text;
+  if (!(key in wCache)) {
+    ctx.font = `bold ${size * PT}px ${FONT}`;
+    wCache[key] = ctx.measureText(text).width;
+  }
+  return wCache[key];
+}
+
+function* phraseCycle() {
+  while (true) {
+    const order = PHRASES.slice();
+    shuffle(order);
+    yield* order;
+  }
+}
+const mathDist = (x, y) => Math.hypot(x / (16 * SC), (y - CY) / (14.5 * SC));
+
+// ====== SUSUN TEKS DI DALAM HATI ======
+function build() {
+  const cycle = phraseCycle();
+  const rowH = Math.max(...SIZES.map((z) => z * PT * 1.15)) + 4;
+  const half = rowH / 2;
+  const placed = [];
+
+  for (let y = YMAX - half; y > YMIN + half; y -= rowH) {
+    const row = intersect(spans(y + half), spans(y - half));
+    for (let [lo, hi] of row) {
+      lo += 4; hi -= 4;
+      let cur = lo + uniform(0, 8);
+      const line = [];
+      while (true) {
+        let fit = null;
+        for (let n = 0; n < 10; n++) {
+          const text = cycle.next().value;
+          const size = choice(SIZES);
+          const w = measure(text, size);
+          if (cur + w <= hi) { fit = { text, size, w }; break; }
+        }
+        if (!fit) break;
+        line.push([cur + fit.w / 2, fit.text, fit.size, fit.w]);
+        cur += fit.w + GAP;
+      }
+      if (!line.length) continue;
+      if (line.length > 1) {
+        const last = line[line.length - 1];
+        const left = hi - (last[0] + last[3] / 2);
+        line.forEach((it, i) => (it[0] += (left * i) / (line.length - 1)));
+      } else {
+        line[0][0] = (lo + hi) / 2;
+      }
+      line.forEach(([x, text, size], i) =>
+        placed.push({ x, y, text, size, edge: i === 0 || i === line.length - 1 })
+      );
+    }
+  }
+
+  const wine = [0.58, 0.0, 0.09], crimson = [0.90, 0.05, 0.14], blood = [0.98, 0.10, 0.16];
+  for (const p of placed) {
+    const rad = Math.min(1, mathDist(p.x, p.y));
+    let base = mix(wine, crimson, 0.25 + 0.75 * rad);
+    base = mix(base, blood, uniform(0, 0.35) + (p.edge ? 0.3 : 0));
+    p.color = base.map((v) => Math.min(1, v));
+    p.rad = rad;
+  }
+  const edges = placed.filter((p) => p.edge);
+  const inner = placed.filter((p) => !p.edge);
+  const ang = (p) => (((Math.atan2(p.x, p.y - CY) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI));
+  edges.sort((a, b) => ang(a) - ang(b));
+  inner.sort((a, b) => (-a.rad + uniform(0, 0.08)) - (-b.rad + uniform(0, 0.08)));
+  return edges.concat(inner);
+}
+
+// ====== MENGGAMBAR ======
+function text(c, x, y, str, size, color) {
+  c.font = `bold ${size * PT}px ${FONT}`;
+  c.textAlign = "center";
+  c.textBaseline = "middle";
+  c.fillStyle = color;
+  c.fillText(str, x, -y + 0); // y hati naik ke atas, canvas turun ke bawah
+}
+function drawStatic(c, p) {
+  text(c, p.x + 2, p.y - 3, p.text, p.size, hx(dim(p.color, 0.30)));
+  text(c, p.x, p.y, p.text, p.size + 1, hx(dim(p.color, 0.20)));
+  text(c, p.x, p.y, p.text, p.size, hx(p.color));
+}
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth; H = window.innerHeight;
+  for (const c of [cv, buf]) { c.width = W * dpr; c.height = H * dpr; }
+  k = Math.min(W / 720, H / 760);
+  for (const c of [ctx, bctx]) c.setTransform(dpr * k, 0, 0, dpr * k, (dpr * W) / 2, (dpr * H) / 2);
+  finished.forEach((p) => drawStatic(bctx, p));
+}
+
+// ====== ANIMASI ======
+const ORDER = build();
+const finished = [], active = [];
+let idx = 0, acc = 0, spawning = true;
+const RATE = ORDER.length / ((DURATION * 1000) / TICK);
+
+function spawn(p) {
+  p.f = 0;
+  p.dx = uniform(-10, 10);
+  p.cs = BGC; p.ch = BGC; p.cm = BGC;
+  p.px = p.x + p.dx; p.py = p.y + LIFT;
+  active.push(p);
+}
+
+function advance(p) {
+  p.f++;
+  const u = clamp(p.f / ANIM);
+  const e = 1 - (1 - u) ** 3;
+  p.px = p.x + p.dx * (1 - e);
+  p.py = p.y + (1 - e) * LIFT;
+  p.cs = mix(BGC, dim(p.color, 0.30), e);
+  p.ch = mix(BGC, dim(p.color, 0.20), e * e);
+  const flash = 0.75 * Math.sin(Math.PI * clamp((u - 0.55) / 0.45));
+  p.cm = mix(mix(BGC, p.color, e ** 1.5), FLASH, flash);
+  return u < 1;
+}
+
+function tick() {
+  if (spawning) {
+    acc += RATE;
+    while (acc >= 1 && idx < ORDER.length) { acc -= 1; spawn(ORDER[idx++]); }
+    if (idx >= ORDER.length) spawning = false;
+  }
+  for (let i = active.length - 1; i >= 0; i--) {
+    if (!advance(active[i])) {
+      const p = active.splice(i, 1)[0];
+      finished.push(p);
+      drawStatic(bctx, p);
+    }
+  }
+}
+
+// ====== SHIMMER (kilau acak setelah semua muncul) ======
+const shimmers = [];
+let nextShimmer = 0;
+
+function render(now) {
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.drawImage(buf, 0, 0);
+  ctx.restore();
+
+  for (const p of active) {
+    text(ctx, p.x + 2, p.y - 3, p.text, p.size, hx(p.cs));
+    text(ctx, p.px, p.py, p.text, p.size + 1, hx(p.ch));
+    text(ctx, p.px, p.py, p.text, p.size, hx(p.cm));
+  }
+  for (let i = shimmers.length - 1; i >= 0; i--) {
+    if (now > shimmers[i].until) { shimmers.splice(i, 1); continue; }
+    const p = shimmers[i].p;
+    text(ctx, p.x, p.y, p.text, p.size, hx(mix(p.color, FLASH, 0.6)));
+  }
+}
+
+let last = null, lag = 0;
+function frame(now) {
+  if (last === null) last = now;
+  lag = Math.min(lag + (now - last), 200);
+  last = now;
+  while (lag >= TICK) { tick(); lag -= TICK; }
+
+  if (!spawning && !active.length && now >= nextShimmer) {
+    shimmers.push({ p: choice(ORDER), until: now + 260 });
+    nextShimmer = now + 140;
+  }
+  render(now);
+  requestAnimationFrame(frame);
+}
+
+window.addEventListener("resize", resize);
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
